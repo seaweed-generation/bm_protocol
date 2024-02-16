@@ -34,3 +34,6 @@
 [submodule "src/third_party/BME280_driver"]
 	path = src/third_party/BME280_driver
 	url = https://github.com/sofarocean/BME280_driver.git
+[submodule "src/third_party/Ezo_uart_lib"]
+	path = src/third_party/Ezo_uart_lib
+	url = git@github.com:Atlas-Scientific/Ezo_uart_lib.git

@@ -13,11 +13,15 @@
 #include "util.h"
 #include <new>
 
+// TODO - get this from the sensor node itself
+#define DEFAULT_SOFT_READING_PERIOD_MS 500 // 2Hz
+
 bool SoftSensor::subscribe() {
   bool rval = false;
   char *sub = static_cast<char *>(pvPortMalloc(BM_TOPIC_MAX_LEN));
   configASSERT(sub);
-  int topic_strlen = snprintf(sub, BM_TOPIC_MAX_LEN, "%" PRIx64 "%s", node_id, subtag);
+  int topic_strlen =
+      snprintf(sub, BM_TOPIC_MAX_LEN, "sensor/%016" PRIx64 "%s", node_id, subtag);
   if (topic_strlen > 0) {
     rval = bm_sub_wl(sub, topic_strlen, softSubCallback);
   }
@@ -30,7 +34,7 @@ void SoftSensor::softSubCallback(uint64_t node_id, const char *topic, uint16_t t
                                  uint8_t version) {
   (void)type;
   (void)version;
-  printf("SOFT data received from node %" PRIx64 " On topic: %.*s\n", node_id, topic_len,
+  printf("SOFT data received from node %016" PRIx64 " On topic: %.*s\n", node_id, topic_len,
          topic);
   Soft_t *soft = static_cast<Soft_t *>(sensorControllerFindSensorById(node_id));
   if (soft && soft->type == SENSOR_TYPE_SOFT) {
@@ -49,24 +53,31 @@ void SoftSensor::softSubCallback(uint64_t node_id, const char *topic, uint16_t t
         uint64_t sensor_reading_time_sec = soft_data.header.sensor_reading_time_ms / 1000U;
         uint32_t sensor_reading_time_millis = soft_data.header.sensor_reading_time_ms % 1000U;
 
-        int8_t node_position = topology_sampler_get_node_position(node_id, 1000);
+        uint32_t current_timestamp = pdTICKS_TO_MS(xTaskGetTickCount());
+        if ((current_timestamp - soft->last_timestamp > DEFAULT_SOFT_READING_PERIOD_MS + 1000u) ||
+            soft->reading_count == 1U) {
+          printf("Updating soft %016" PRIx64 " node position, current_time = %" PRIu32
+                 ", last_time = %" PRIu32 ", reading count: %" PRIu32 "\n",
+                 node_id, current_timestamp, soft->last_timestamp, soft->reading_count);
+          soft->node_position = topology_sampler_get_node_position(node_id, pdTICKS_TO_MS(5000));
+        }
+        soft->last_timestamp = current_timestamp;
 
         size_t log_buflen =
             snprintf(log_buf, SENSOR_LOG_BUF_SIZE,
-                     "%" PRIx64 ","   // Node Id
-                     "%" PRIi8 ","    // node_position
-                     "soft,"          // node_app_name
-                     "%" PRIu64 ","   // reading_uptime_millis
-                     "%" PRIu64 "."   // reading_time_utc_ms seconds part
-                     "%03" PRIu32 "," // reading_time_utc_ms millis part
-                     "%" PRIu64 "."   // sensor_reading_time_ms seconds part
-                     "%03" PRIu32 "," // sensor_reading_time_ms millis part
-                     "%.3f\n",        // temp_deg_c
-                     node_id, node_position, soft_data.header.reading_uptime_millis, reading_time_sec,
-                     reading_time_millis, sensor_reading_time_sec, sensor_reading_time_millis,
-                     soft_data.temperature_deg_c);
+                     "%016" PRIx64 "," // Node Id
+                     "%" PRIi8 ","     // node_position
+                     "soft,"           // node_app_name
+                     "%" PRIu64 ","    // reading_uptime_millis
+                     "%" PRIu64 "."    // reading_time_utc_ms seconds part
+                     "%03" PRIu32 ","  // reading_time_utc_ms millis part
+                     "%" PRIu64 "."    // sensor_reading_time_ms seconds part
+                     "%03" PRIu32 ","  // sensor_reading_time_ms millis part
+                     "%.3f\n",         // temp_deg_c
+                     node_id, soft->node_position, soft_data.header.reading_uptime_millis,
+                     reading_time_sec, reading_time_millis, sensor_reading_time_sec,
+                     sensor_reading_time_millis, soft_data.temperature_deg_c);
         if (log_buflen > 0) {
-          // TODO - keep as individual log or switch to the bm_sensor common log
           BRIDGE_SENSOR_LOG_PRINTN(BM_COMMON_IND, log_buf, log_buflen);
         } else {
           printf("ERROR: Failed to print soft individual log\n");
@@ -91,9 +102,10 @@ void SoftSensor::aggregate(void) {
     if (temp_deg_c.getNumSamples() >= MIN_READINGS_FOR_AGGREGATION) {
       soft_aggs.temp_mean_deg_c = temp_deg_c.getMean();
       soft_aggs.reading_count = reading_count;
-      if (soft_aggs.temp_mean_deg_c < TEMP_SAMPLE_MEMBER_MIN ||
-          soft_aggs.temp_mean_deg_c > TEMP_SAMPLE_MEMBER_MAX) {
-        soft_aggs.temp_mean_deg_c = NAN;
+      if (soft_aggs.temp_mean_deg_c < TEMP_SAMPLE_MEMBER_MIN) {
+        soft_aggs.temp_mean_deg_c = -HUGE_VAL;
+      } else if (soft_aggs.temp_mean_deg_c > TEMP_SAMPLE_MEMBER_MAX) {
+        soft_aggs.temp_mean_deg_c = HUGE_VAL;
       }
     }
     static constexpr uint8_t TIME_STR_BUFSIZE = 50;
@@ -103,19 +115,18 @@ void SoftSensor::aggregate(void) {
       snprintf(time_str, TIME_STR_BUFSIZE, "0");
     }
 
-    int8_t node_position = topology_sampler_get_node_position(node_id, 1000);
+    int8_t node_position = topology_sampler_get_node_position(node_id, pdTICKS_TO_MS(5000));
 
-    log_buflen =
-        snprintf(log_buf, SENSOR_LOG_BUF_SIZE,
-                 "%" PRIx64 "," // Node Id
-                 "%" PRIi8 ","  // node_position
-                 "soft,"        // node_app_name
-                 "%s,"          // timstamp(ticks/UTC)
-                 "%" PRIu32 "," // reading_count
-                 "%.3f\n",      // temp_mean_deg_c
-                 node_id, node_position, time_str, soft_aggs.reading_count, soft_aggs.temp_mean_deg_c);
+    log_buflen = snprintf(log_buf, SENSOR_LOG_BUF_SIZE,
+                          "%016" PRIx64 "," // Node Id
+                          "%" PRIi8 ","     // node_position
+                          "soft,"           // node_app_name
+                          "%s,"             // timestamp(ticks/UTC)
+                          "%" PRIu32 ","    // reading_count
+                          "%.3f\n",         // temp_mean_deg_c
+                          node_id, node_position, time_str, soft_aggs.reading_count,
+                          soft_aggs.temp_mean_deg_c);
     if (log_buflen > 0) {
-      // TODO - keep as individual log or switch to the bm_sensor common log
       BRIDGE_SENSOR_LOG_PRINTN(BM_COMMON_AGG, log_buf, log_buflen);
     } else {
       printf("ERROR: Failed to print soft aggregate log\n");

@@ -31,9 +31,9 @@ static bool powerSample() {
   float voltage, current;
   bool success = false;
   bool rval = true;
-  uint8_t retriesRemaining = SENSORS_NUM_RETRIES;
 
   for (uint8_t dev_num = 0; dev_num < NUM_INA232_DEV; dev_num++) {
+    uint8_t retriesRemaining = SENSORS_NUM_RETRIES;
     do {
       success = _inaSensors[dev_num]->measurePower();
       if (success) {
@@ -68,6 +68,8 @@ static bool powerSample() {
       taskEXIT_CRITICAL();
     } else {
       printf("ERR Failed to sample power monitor %u!", dev_num);
+      bm_printf(0, "ERR Failed to sample power monitor %u!", dev_num);
+      bm_fprintf(0, "power.log", "ERR Failed to sample power monitor %u!", dev_num);
     }
     rval &= success;
   }

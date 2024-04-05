@@ -27,6 +27,11 @@ void RbrSensor::init(BmRbrDataMsg::SensorType_t type) {
       _parsers[i]->init();
     }
   }
+
+  systemConfigurationPartition->getConfig(sensor_bm_log_enable, strlen(sensor_bm_log_enable),
+                                          _sensorBmLogEnable);
+  printf("sensorBmLogEnable: %" PRIu32 "\n", _sensorBmLogEnable);
+
   PLUART::init(USER_TASK_PRIORITY);
   // Baud set per expected baud rate of the sensor.
   PLUART::setBaud(BAUD_RATE);
@@ -95,7 +100,15 @@ bool RbrSensor::probeType(uint32_t timeout_ms) {
           _type = BmRbrDataMsg::SensorType::TEMPERATURE;
           success = true;
           break;
+        } else {
+          bm_fprintf(0, RBR_RAW_LOG, "Invalid outputformat: %s\n", _payload_buffer);
+          bm_printf(0, "Invalid outputformat: %s\n", _payload_buffer);
+          printf("Invalid outputformat: %s\n", _payload_buffer);
         }
+      } else {
+        bm_fprintf(0, RBR_RAW_LOG, "Invalid outputformat: %s\n", _payload_buffer);
+        bm_printf(0, "Invalid outputformat: %s\n", _payload_buffer);
+        printf("Invalid outputformat: %s\n", _payload_buffer);
       }
     }
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -108,10 +121,10 @@ bool RbrSensor::probeType(uint32_t timeout_ms) {
       printf("RBR sensor was lost\n");
     }
   } else {
-    if (_sensorDropDebounceCount) {
-      bm_fprintf(0, RBR_RAW_LOG, "RBR sensor was recovered\n");
-      bm_printf(0, "RBR sensor was recovered\n");
-      printf("RBR sensor was recovered\n");
+    if (_sensorDropDebounceCount >= SENSOR_DROP_DEBOUNCE_MAX_COUNT) {
+      bm_fprintf(0, RBR_RAW_LOG, "RBR sensor online\n");
+      bm_printf(0, "RBR sensor online\n");
+      printf("RBR sensor online\n");
     }
     _sensorDropDebounceCount = 0;
   }
@@ -129,20 +142,30 @@ bool RbrSensor::getData(BmRbrDataMsg::Data &d) {
     // Read a line if it is available
     if (PLUART::lineAvailable()) {
       uint16_t read_len = PLUART::readLine(_payload_buffer, sizeof(_payload_buffer));
-      if (!BmRbrSensorUtil::validSensorDataString(_payload_buffer, read_len)) {
-        break;
-      }
+
       // Get the RTC if available
       RTCTimeAndDate_t time_and_date = {};
       rtcGet(&time_and_date);
       char rtcTimeBuffer[32] = {};
       rtcPrint(rtcTimeBuffer, NULL);
-      bm_fprintf(0, RBR_RAW_LOG, "tick: %" PRIu64 ", rtc: %s, line: %.*s\n", uptimeGetMs(),
-                 rtcTimeBuffer, read_len, _payload_buffer);
-      bm_printf(0, "[rbr] | tick: %" PRIu64 ", rtc: %s, line: %.*s", uptimeGetMs(),
-                rtcTimeBuffer, read_len, _payload_buffer);
-      printf("[rbr] | tick: %" PRIu64 ", rtc: %s, line: %.*s\n", uptimeGetMs(), rtcTimeBuffer,
+      if (_sensorBmLogEnable) {
+        bm_fprintf(0, RBR_RAW_LOG, "tick: %" PRIu64 ", rtc: %s, line: %.*s\n", uptimeGetMs(),
+                   rtcTimeBuffer, read_len, _payload_buffer);
+      }
+      bm_printf(0, "rbr | tick: %" PRIu64 ", rtc: %s, line: %.*s", uptimeGetMs(), rtcTimeBuffer,
+                read_len, _payload_buffer);
+      printf("rbr | tick: %" PRIu64 ", rtc: %s, line: %.*s\n", uptimeGetMs(), rtcTimeBuffer,
              read_len, _payload_buffer);
+
+      BmRbrSensorUtil::preprocessLine(_payload_buffer, read_len);
+
+      if (!BmRbrSensorUtil::validSensorDataString(_payload_buffer, read_len)) {
+        bm_fprintf(0, RBR_RAW_LOG, "Invalid sensor data string: %.*s\n", read_len,
+                   _payload_buffer);
+        bm_printf(0, "Invalid sensor data string: %.*s\n", read_len, _payload_buffer);
+        printf("Invalid sensor data string: %.*s\n", read_len, _payload_buffer);
+        break;
+      }
 
       // Now when we get a line of text data, our LineParser turns it into numeric values.
       if (_parsers[_type] && _parsers[_type]->parseLine(_payload_buffer, read_len)) {
@@ -151,6 +174,8 @@ bool RbrSensor::getData(BmRbrDataMsg::Data &d) {
           Value timeValue = _parsers[_type]->getValue(0);
           Value tempValue = _parsers[_type]->getValue(1);
           if (timeValue.type != TYPE_UINT64 || tempValue.type != TYPE_DOUBLE) {
+            printf("Parsed invalid values: time: %d, temp: %d\n", timeValue.type,
+                   tempValue.type);
             break;
           }
           if (!BmRbrSensorUtil::validSensorData(BmRbrSensorUtil::TEMPERATURE,
@@ -171,6 +196,8 @@ bool RbrSensor::getData(BmRbrDataMsg::Data &d) {
           Value timeValue = _parsers[_type]->getValue(0);
           Value pressureValue = _parsers[_type]->getValue(1);
           if (timeValue.type != TYPE_UINT64 || pressureValue.type != TYPE_DOUBLE) {
+            printf("Parsed invalid types: time: %d, pressure: %d\n", timeValue.type,
+                   pressureValue.type);
             break;
           }
           if (!BmRbrSensorUtil::validSensorData(BmRbrSensorUtil::PRESSURE,
@@ -193,6 +220,8 @@ bool RbrSensor::getData(BmRbrDataMsg::Data &d) {
           Value pressureValue = _parsers[_type]->getValue(2);
           if (timeValue.type != TYPE_UINT64 || tempValue.type != TYPE_DOUBLE ||
               pressureValue.type != TYPE_DOUBLE) {
+            printf("Parsed invalid types: time: %d, temp: %d, pressure: %d\n", timeValue.type,
+                   tempValue.type, pressureValue.type);
             break;
           }
           if (!BmRbrSensorUtil::validSensorData(BmRbrSensorUtil::TEMPERATURE,

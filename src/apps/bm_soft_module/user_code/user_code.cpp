@@ -23,6 +23,12 @@
 
 static constexpr char SOFTMODULE_WATCHDOG_ID[] = "softmodule";
 static constexpr char soft_log[] = "soft.log";
+static constexpr char soft_cfg_tsys_id[] = "tsysId";
+static constexpr char soft_cfg_cal_temp_c[] = "calTempC";
+static constexpr char soft_cfg_cal_time_epoch[] = "calTimeEpoch";
+static constexpr char soft_cfg_cal_offset_milli_c[] = "calOffsetMilliC";
+static constexpr char soft_cfg_reading_period_ms[] = "softReadingPeriodMs";
+static constexpr char sensor_bm_log_enable[] = "sensorBmLogEnable";
 
 // app_main passes a handle to the user config partition in NVM.
 extern cfg::Configuration *userConfigurationPartition;
@@ -35,55 +41,70 @@ static uint32_t cal_time_epoch = 0;
 static char bmSoftTopic[BM_TOPIC_MAX_LEN];
 static int bmSoftTopicStrLen;
 static float calibrationOffsetDegC = 0.0;
+static uint32_t sensorBmLogEnable = 0;
 
 static bool BmSoftWatchdogHandler(void *arg);
 static bool BmSoftStartAndValidate(void);
 static int createBmSoftDataTopic(void);
 static void BmSoftInitalize(void);
 
-void setup(void) {
-  configASSERT(userConfigurationPartition);
-  configASSERT(sysConfigurationPartition);
-  BmSoftInitalize();
+static void getConfigs() {
+  if (sysConfigurationPartition->getConfig(soft_cfg_tsys_id, strlen(soft_cfg_tsys_id),
+                                           serial_number)) {
+    printf("TSYS serial number: %" PRIu32 "\n", serial_number);
+  } else {
+    printf("No TSYS serial number found\n");
+    bm_fprintf(0, soft_log, "No TSYS serial number found\n");
+    bm_printf(0, "No TSYS serial number found");
+  }
+
   int32_t calTempC = 0;
-  int32_t calTempMilliC = 0;
-  if (sysConfigurationPartition->getConfig("calTempC", strlen("calTempC"), calTempC)) {
-    printf("calTempC: %" PRId32 "\n", calTempC);
+  if (sysConfigurationPartition->getConfig(soft_cfg_cal_temp_c, strlen(soft_cfg_cal_temp_c),
+                                           calTempC)) {
+    printf("Calibration temperature: %" PRId32 "\n", calTempC);
   } else {
     printf("No calibration temperature found\n");
     bm_fprintf(0, soft_log, "No calibration temperature found\n");
     bm_printf(0, "No calibration temperature found");
   }
-  if (sysConfigurationPartition->getConfig("tsysId", strlen("tsysId"), serial_number)) {
-    printf("SOFT Serial Number: %" PRIu32 "\n", serial_number);
-  } else {
-    printf("No calibration serial number found\n");
-    bm_fprintf(0, soft_log, "No calibration serial number found\n");
-    bm_printf(0, "No calibration serial number found");
-  }
-  if (sysConfigurationPartition->getConfig("calTimeEpoch", strlen("calTimeEpoch"),
-                                           cal_time_epoch)) {
-    printf("Cal time: %" PRIu32 "\n", cal_time_epoch);
+
+  if (sysConfigurationPartition->getConfig(soft_cfg_cal_time_epoch,
+                                           strlen(soft_cfg_cal_time_epoch), cal_time_epoch)) {
+    printf("Calibration time: %" PRIu32 "\n", cal_time_epoch);
   } else {
     printf("No calibration time found\n");
     bm_fprintf(0, soft_log, "No calibration time found\n");
     bm_printf(0, "No calibration time found");
   }
-  if (sysConfigurationPartition->getConfig("calTempMilliC", strlen("calTempMilliC"),
-                                           calTempMilliC)) {
-    printf("calTempMilliC: %" PRId32 "\n", calTempMilliC);
+
+  int32_t calOffsetMilliC = 0;
+  if (sysConfigurationPartition->getConfig(
+          soft_cfg_cal_offset_milli_c, strlen(soft_cfg_cal_offset_milli_c), calOffsetMilliC)) {
+    printf("Calibration offset (milliDegC): %" PRId32 "\n", calOffsetMilliC);
   } else {
-    printf("No calibration temperature (milliDegC) found\n");
-    bm_fprintf(0, soft_log, "No calibration temperature (milliDegC) found\n");
-    bm_printf(0, "No calibration temperature (milliDegC) found");
+    printf("No calibration offset (milliDegC) found\n");
+    bm_fprintf(0, soft_log, "No calibration offset (milliDegC) found\n");
+    bm_printf(0, "No calibration offset (milliDegC) found");
   }
-  calibrationOffsetDegC = (calTempC + (calTempMilliC / 1000.0f));
-  if (userConfigurationPartition->getConfig("softReadingPeriodMs",
-                                            strlen("softReadingPeriodMs"), soft_delay_ms)) {
+  calibrationOffsetDegC = static_cast<float>(calOffsetMilliC) * 1e-3f;
+
+  if (userConfigurationPartition->getConfig(
+          soft_cfg_reading_period_ms, strlen(soft_cfg_reading_period_ms), soft_delay_ms)) {
     printf("SOFT Delay: %" PRIu32 "ms\n", soft_delay_ms);
   } else {
     printf("SOFT Delay: Using default % " PRIu32 "ms\n", soft_delay_ms);
   }
+
+  sysConfigurationPartition->getConfig(sensor_bm_log_enable, strlen(sensor_bm_log_enable),
+                                       sensorBmLogEnable);
+  printf("sensorBmLogEnable: %" PRIu32 "\n", sensorBmLogEnable);
+}
+
+void setup(void) {
+  configASSERT(userConfigurationPartition);
+  configASSERT(sysConfigurationPartition);
+  getConfigs();
+  BmSoftInitalize();
   bmSoftTopicStrLen = createBmSoftDataTopic();
   SensorWatchdog::SensorWatchdogAdd(SOFTMODULE_WATCHDOG_ID, PAYLOAD_WATCHDOG_TIMEOUT_MS,
                                     BmSoftWatchdogHandler, NO_MAX_TRIGGER, soft_log);
@@ -99,14 +120,18 @@ void loop(void) {
     rtcPrint(rtcTimeBuffer, &time_and_date);
   };
 
-  if (soft.getTemperature(temperature)) {
+  TSYS01::tsys01_result_e result = soft.getTemperature(temperature);
+  switch (result) {
+  case TSYS01::TSYS01_RESULT_OK: {
     SensorWatchdog::SensorWatchdogPet(SOFTMODULE_WATCHDOG_ID);
 
     printf("soft | tick: %llu, rtc: %s, temp: %f\n", uptimeGetMs(), rtcTimeBuffer, temperature);
-    bm_fprintf(0, soft_log, "soft | tick: %llu, rtc: %s, temp: %f\n", uptimeGetMs(),
-               rtcTimeBuffer, temperature);
     bm_printf(0, "soft | tick: %llu, rtc: %s, temp: %f", uptimeGetMs(), rtcTimeBuffer,
               temperature);
+    if (sensorBmLogEnable) {
+      bm_fprintf(0, soft_log, "soft | tick: %llu, rtc: %s, temp: %f\n", uptimeGetMs(),
+                 rtcTimeBuffer, temperature);
+    }
     static BmSoftDataMsg::Data d;
     d.header.version = 1;
     if (rtcValid) {
@@ -122,6 +147,32 @@ void loop(void) {
     } else {
       printf("Failed to encode data message\n");
     }
+    break;
+  }
+  case TSYS01::TSYS01_RESULT_COMMS: {
+    printf("soft | tick: %llu, rtc: %s, COMMS ERROR\n", uptimeGetMs(), rtcTimeBuffer);
+    bm_fprintf(0, soft_log, "soft | tick: %llu, rtc: %s,  COMMS ERROR\n", uptimeGetMs(),
+               rtcTimeBuffer);
+    bm_printf(0, "soft | tick: %llu, rtc: %s,  COMMS ERROR", uptimeGetMs(), rtcTimeBuffer);
+    break;
+  }
+  case TSYS01::TSYS01_RESULT_INVALID: {
+    printf("soft | tick: %llu, rtc: %s, INVALID temp: %f\n", uptimeGetMs(), rtcTimeBuffer,
+           temperature);
+    bm_fprintf(0, soft_log, "soft | tick: %llu, rtc: %s, INVALID temp: %f\n", uptimeGetMs(),
+               rtcTimeBuffer, temperature);
+    bm_printf(0, "soft | tick: %llu, rtc: %s, INVALID temp: %f", uptimeGetMs(), rtcTimeBuffer,
+              temperature);
+    BmSoftStartAndValidate();
+    break;
+  }
+  default: {
+    printf("soft | tick: %llu, rtc: %s, UNKNOWN ERROR\n", uptimeGetMs(), rtcTimeBuffer);
+    bm_fprintf(0, soft_log, "soft | tick: %llu, rtc: %s,  UNKNOWN ERROR\n", uptimeGetMs(),
+               rtcTimeBuffer);
+    bm_printf(0, "soft | tick: %llu, rtc: %s,  UNKNOWN ERROR", uptimeGetMs(), rtcTimeBuffer);
+    break;
+  }
   }
 
   // Delay between readings
@@ -164,8 +215,8 @@ static bool BmSoftWatchdogHandler(void *arg) {
 }
 
 static int createBmSoftDataTopic(void) {
-  int topiclen =
-      snprintf(bmSoftTopic, BM_TOPIC_MAX_LEN, "%" PRIx64 "/bm_soft_temp", getNodeId());
+  int topiclen = snprintf(bmSoftTopic, BM_TOPIC_MAX_LEN,
+                          "sensor/%016" PRIx64 "/sofar/bm_soft_temp", getNodeId());
   configASSERT(topiclen > 0);
   return topiclen;
 }

@@ -69,6 +69,29 @@ void SMConfigCRCList::clear() {
   encode();
 }
 
+/*!
+  \brief Alloc the list of CRCs.
+
+  This function reads the list from the configuration.
+  User needs to free the returned list.
+
+  \param[out] num_crcs[out] The number of CRCs in the list.
+  \return A pointer to the list of CRCs.
+*/
+uint32_t *SMConfigCRCList::alloc_list(uint32_t &num_crcs) {
+  decode();
+  if (_num_crcs) {
+    num_crcs = _num_crcs;
+    uint32_t *crc_list = static_cast<uint32_t *>(pvPortMalloc(_num_crcs * sizeof(uint32_t)));
+    configASSERT(crc_list);
+    memcpy(crc_list, _crc_list, _num_crcs * sizeof(uint32_t));
+    return crc_list;
+  } else {
+    num_crcs = 0;
+  }
+  return NULL;
+}
+
 // ---------------------------- PRIVATE ----------------------------
 
 /*!

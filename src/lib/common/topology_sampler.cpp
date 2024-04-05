@@ -5,6 +5,7 @@
 #include "task_priorities.h"
 #include "timer_callback_handler.h"
 #include "timers.h"
+#include <stdarg.h>
 #include <string.h>
 
 #include "bcmp.h"
@@ -16,18 +17,20 @@
 #include "bm_l2.h"
 #include "bm_serial.h"
 #include "bm_util.h"
+#include "bridgeLog.h"
 #include "cbor.h"
 #include "config_cbor_map_service.h"
 #include "config_cbor_map_srv_reply_msg.h"
 #include "config_cbor_map_srv_request_msg.h"
 #include "crc.h"
 #include "device_info.h"
+#include "sensorController.h"
 #include "sm_config_crc_list.h"
+#include "stm32_rtc.h"
 #include "sys_info_service.h"
 #include "sys_info_svc_reply_msg.h"
 #include "topology_sampler.h"
 #include "util.h"
-#include "bridgeLog.h"
 
 #define TOPOLOGY_TIMEOUT_MS 60000
 #define NETWORK_CONFIG_TIMEOUT_MS 1000
@@ -40,9 +43,8 @@
 #define NODE_NETWORK_SYS_INFO_REQUEST_TIMEOUT_MS (NODE_SYS_INFO_REQUEST_TIMEOUT_S * 1000)
 #define NODE_CONFIG_CBOR_MAP_REQUEST_TIMEOUT_S (3)
 #define NODE_CONFIG_CBOR_MAP_REQUEST_TIMEOUT_MS (NODE_CONFIG_CBOR_MAP_REQUEST_TIMEOUT_S * 1000)
- // Accounts for name of app + cbor config map + encoding inefficiencies
+// Accounts for name of app + cbor config map + encoding inefficiencies
 #define NODE_CONFIG_PADDING (512)
-#define NUM_CONFIG_FIELDS_PER_NODE (5)
 
 typedef struct network_configuration_info {
   uint32_t network_crc32;
@@ -75,19 +77,24 @@ static bool sys_info_reply_cb(bool ack, uint32_t msg_id, size_t service_strlen,
 static bool cbor_config_map_reply_cb(bool ack, uint32_t msg_id, size_t service_strlen,
                                      const char *service, size_t reply_len,
                                      uint8_t *reply_data);
-static bool encode_sys_info(CborEncoder &array_encoder,
-                                SysInfoSvcReplyMsg::Data &sys_info);
+static bool encode_sys_info(CborEncoder &array_encoder, SysInfoSvcReplyMsg::Data &sys_info);
 static bool encode_cbor_configuration(CborEncoder &array_encoder,
                                       ConfigCborMapSrvReplyMsg::Data &cbor_map_reply);
 static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bufsize);
 
 static void _update_sensor_type_list(uint64_t node_id, char *app_name, uint32_t app_name_len);
 
+static CborError cborStreamFunct(void *token, const char *fmt, ...);
+
+static void log_cbor_network_configurations(uint8_t *cbor_buf, size_t cbor_buf_size);
+static void log_network_crc_info(uint32_t network_crc32, SMConfigCRCList &sm_config_crc_list);
+
 static void topology_sample_cb(networkTopology_t *networkTopology) {
   uint8_t *cbor_buffer = NULL;
   bm_common_network_info_t *network_info = NULL;
   xSemaphoreTake(_node_list.node_list_mutex, portMAX_DELAY);
   do {
+    SMConfigCRCList sm_config_crc_list(_hw_cfg);
     if (!networkTopology) {
       printf("networkTopology NULL, task must be busy\n");
       break;
@@ -147,40 +154,38 @@ static void topology_sample_cb(networkTopology_t *networkTopology) {
     }
 
     if (cbor_buffer) {
-      for(uint32_t i = 0; i < cbor_bufsize; i++) {
+      for (uint32_t i = 0; i < cbor_bufsize; i++) {
         printf("%02x ", cbor_buffer[i]);
-        if(i % 16 == 15) { // print a newline every 16 bytes (for print pretty-ness)
+        if (i % 16 == 15) { // print a newline every 16 bytes (for print pretty-ness)
           printf("\n");
         }
       }
       // If we have a new configuration, store it.
-      if(_node_list.last_network_configuration_info.network_crc32 != network_crc32_calc) {
-        if(_node_list.last_network_configuration_info.cbor_config_map) {
+      if (_node_list.last_network_configuration_info.network_crc32 != network_crc32_calc) {
+        if (_node_list.last_network_configuration_info.cbor_config_map) {
           vPortFree(_node_list.last_network_configuration_info.cbor_config_map);
           _node_list.last_network_configuration_info.cbor_config_map = NULL;
         }
         _node_list.last_network_configuration_info.network_crc32 = network_crc32_calc;
         _node_list.last_network_configuration_info.cbor_config_map_size = cbor_bufsize;
-        _node_list.last_network_configuration_info.cbor_config_map = static_cast<uint8_t *>(pvPortMalloc(cbor_bufsize));
+        _node_list.last_network_configuration_info.cbor_config_map =
+            static_cast<uint8_t *>(pvPortMalloc(cbor_bufsize));
         configASSERT(_node_list.last_network_configuration_info.cbor_config_map);
-        memcpy(_node_list.last_network_configuration_info.cbor_config_map, cbor_buffer, cbor_bufsize);
+        memcpy(_node_list.last_network_configuration_info.cbor_config_map, cbor_buffer,
+               cbor_bufsize);
+        log_network_crc_info(network_crc32_calc, sm_config_crc_list);
+        log_cbor_network_configurations(cbor_buffer, cbor_bufsize);
       }
       printf("\n");
     }
 
-    SMConfigCRCList sm_config_crc_list(_hw_cfg);
     bool known = sm_config_crc_list.contains(network_crc32_calc);
     if (!known || _send_on_boot) {
       if (!known) {
-        static constexpr uint8_t LOG_MSG_SIZE = 128;
-        char * log_msg = static_cast<char *>(pvPortMalloc(LOG_MSG_SIZE));
-        int msglen = snprintf(log_msg, LOG_MSG_SIZE, "The smConfigurationCrc is not in the known list! calc: 0x%" PRIx32
-               " Adding it.\n",
-               network_crc32_calc);
-        if( msglen > 0 ){
-          BRIDGE_LOG_PRINTN(log_msg, msglen);
-        }
-        vPortFree(log_msg);
+        bridgeLogPrint(BRIDGE_SYS, BM_COMMON_LOG_LEVEL_INFO, USE_HEADER,
+                       "The smConfigurationCrc is not in the known list! calc: 0x%" PRIx32
+                       " Adding it.\n",
+                       network_crc32_calc);
         sm_config_crc_list.add(network_crc32_calc);
         if (!_hw_cfg->saveConfig(false)) {
           printf("Failed to save crc!\n");
@@ -203,7 +208,8 @@ static void topology_sample_cb(networkTopology_t *networkTopology) {
       fw_info.gitSHA = getGitSHA();
 
       bm_serial_send_network_info(network_crc32_calc, &config_crc, &fw_info,
-                                  _node_list.num_nodes, _node_list.nodes, cbor_bufsize, cbor_buffer);
+                                  _node_list.num_nodes, _node_list.nodes, cbor_bufsize,
+                                  cbor_buffer);
       if (_send_on_boot) {
         _send_on_boot = false;
       }
@@ -215,7 +221,10 @@ static void topology_sample_cb(networkTopology_t *networkTopology) {
   } while (0);
   xSemaphoreGive(_node_list.node_list_mutex);
 
-  if(cbor_buffer){
+  // Notify the sensor controller task to sample for sensors
+  xTaskNotify(sensor_controller_task_handle, SAMPLER_TIMER_BITS, eSetBits);
+
+  if (cbor_buffer) {
     vPortFree(cbor_buffer);
   }
   if (network_info) {
@@ -276,7 +285,7 @@ static bool sys_info_reply_cb(bool ack, uint32_t msg_id, size_t service_strlen,
         printf("Failed to decode sys info reply\n");
         break;
       }
-      printf(" * Node id: %" PRIx64 "\n", reply.node_id);
+      printf(" * Node id: %016" PRIx64 "\n", reply.node_id);
       printf(" * Git SHA: 0x%08" PRIx32 "\n", reply.git_sha);
       printf(" * Sys config CRC: 0x%08" PRIx32 "\n", reply.sys_config_crc);
       printf(" * App name: %.*s\n", reply.app_name_strlen, reply.app_name);
@@ -288,9 +297,9 @@ static bool sys_info_reply_cb(bool ack, uint32_t msg_id, size_t service_strlen,
       printf("NACK\n");
     }
     rval = true;
-  } while(0);
+  } while (0);
 
-  if(!rval && reply.app_name){
+  if (!rval && reply.app_name) {
     vPortFree(reply.app_name);
   }
   return rval;
@@ -322,7 +331,7 @@ static bool cbor_config_map_reply_cb(bool ack, uint32_t msg_id, size_t service_s
         printf("Failed to decode cbor map reply\n");
         break;
       }
-      printf(" * Node id: %" PRIx64 "\n", reply.node_id);
+      printf(" * Node id: %016" PRIx64 "\n", reply.node_id);
       printf(" * Partition: %" PRId32 "\n", reply.partition_id);
       printf(" * Cbor map len: %" PRIu32 "\n", reply.cbor_encoded_map_len);
       printf(" * Success: %" PRId32 "\n", reply.success);
@@ -347,9 +356,9 @@ static bool cbor_config_map_reply_cb(bool ack, uint32_t msg_id, size_t service_s
       printf("NACK\n");
     }
     rval = true;
-  } while(0);
+  } while (0);
 
-  if(!rval && reply.cbor_data) {
+  if (!rval && reply.cbor_data) {
     vPortFree(reply.cbor_data);
   }
 
@@ -370,8 +379,7 @@ static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bu
     CborError err;
     CborEncoder encoder, array_encoder;
     cbor_encoder_init(&encoder, cbor_buffer, cbor_bufsize, 0);
-    err = cbor_encoder_create_array(&encoder, &array_encoder,
-                                    _node_list.num_nodes);
+    err = cbor_encoder_create_array(&encoder, &array_encoder, _node_list.num_nodes);
     if (err != CborNoError) {
       printf("cbor_encoder_create_array failed: %d\n", err);
       if (err != CborErrorOutOfMemory) {
@@ -387,7 +395,7 @@ static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bu
       CborEncoder sub_array_encoder;
       err = cbor_encoder_create_array(&array_encoder, &sub_array_encoder,
                                       NUM_CONFIG_FIELDS_PER_NODE);
-      if(err != CborNoError) {
+      if (err != CborNoError) {
         printf("cbor_encoder_create_array failed: %d\n", err);
         break;
       }
@@ -399,12 +407,13 @@ static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bu
         // so that the reportBuilder can pull the sensor type from the node id. The sensor type array must match the
         // order of the node id array. This function call is placed here since it is run from the context of the topology
         // sampler callback, which will already have the _node_list mutex taken.
-        _update_sensor_type_list(info_reply.node_id, info_reply.app_name, info_reply.app_name_strlen);
+        _update_sensor_type_list(info_reply.node_id, info_reply.app_name,
+                                 info_reply.app_name_strlen);
 
         // If we have a sys info reply coming back, request the cbor map
-        if (!config_cbor_map_service_request(info_reply.node_id, CONFIG_CBOR_MAP_PARTITION_ID_SYS,
-                                           cbor_config_map_reply_cb,
-                                           NODE_CONFIG_CBOR_MAP_REQUEST_TIMEOUT_S)) {
+        if (!config_cbor_map_service_request(
+                info_reply.node_id, CONFIG_CBOR_MAP_PARTITION_ID_SYS, cbor_config_map_reply_cb,
+                NODE_CONFIG_CBOR_MAP_REQUEST_TIMEOUT_S)) {
           printf("Failed to request cbor map\n");
           break;
         }
@@ -438,20 +447,20 @@ static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bu
         break;
       }
       // Free the memory allocated in the decode functions every loop.
-      if(info_reply.app_name) {
+      if (info_reply.app_name) {
         vPortFree(info_reply.app_name);
         info_reply.app_name = NULL;
       }
-      if(cbor_map_reply.cbor_data) {
+      if (cbor_map_reply.cbor_data) {
         vPortFree(cbor_map_reply.cbor_data);
         cbor_map_reply.cbor_data = NULL;
       }
     }
     // Free the memory allocated in the decode functions in case we broke out of the loop.
-    if(info_reply.app_name) {
+    if (info_reply.app_name) {
       vPortFree(info_reply.app_name);
     }
-    if(cbor_map_reply.cbor_data) {
+    if (cbor_map_reply.cbor_data) {
       vPortFree(cbor_map_reply.cbor_data);
     }
 
@@ -486,8 +495,7 @@ static bool create_network_info_cbor_array(uint8_t *cbor_buffer, size_t &cbor_bu
  * @param[in] sys_info The sys info to encode.
  * @return True if the sys info was encoded, false otherwise.
  */
-static bool encode_sys_info(CborEncoder &array_encoder,
-                                SysInfoSvcReplyMsg::Data &sys_info) {
+static bool encode_sys_info(CborEncoder &array_encoder, SysInfoSvcReplyMsg::Data &sys_info) {
   CborError err = CborNoError;
   do {
     // node id
@@ -535,24 +543,26 @@ static bool encode_cbor_configuration(CborEncoder &array_encoder,
   CborError err;
   do {
     // Open and validate the received cbor map.
-    err = cbor_parser_init(cbor_map_reply.cbor_data, cbor_map_reply.cbor_encoded_map_len, 0, &parser, &map);
-    if(err != CborNoError) {
+    err = cbor_parser_init(cbor_map_reply.cbor_data, cbor_map_reply.cbor_encoded_map_len, 0,
+                           &parser, &map);
+    if (err != CborNoError) {
       break;
     }
     err = cbor_value_validate_basic(&map);
     if (err != CborNoError) {
       break;
     }
-    if(!cbor_value_is_map(&map)){
+    if (!cbor_value_is_map(&map)) {
       err = CborErrorIllegalType;
       break;
     }
-    memcpy(array_encoder.data.ptr, cbor_map_reply.cbor_data, cbor_map_reply.cbor_encoded_map_len);
+    memcpy(array_encoder.data.ptr, cbor_map_reply.cbor_data,
+           cbor_map_reply.cbor_encoded_map_len);
     array_encoder.data.ptr += cbor_map_reply.cbor_encoded_map_len;
     if (array_encoder.remaining) {
       array_encoder.remaining--;
     }
-  } while(0);
+  } while (0);
 
   printf("encode_cbor_configuration: %d\n", err);
   return err == CborNoError;
@@ -719,6 +729,8 @@ int8_t topology_sampler_get_node_position(uint64_t node_id, uint32_t timeout_ms)
       }
     } while (0);
     xSemaphoreGive(_node_list.node_list_mutex);
+  } else {
+    printf("Failed to take node list mutex\n");
   }
   return requested_nodes_position;
 }
@@ -730,7 +742,8 @@ int8_t topology_sampler_get_node_position(uint64_t node_id, uint32_t timeout_ms)
  * @param[out] cbor_config_size The size of the cbor config map in bytes.
  * @return The cbor config map or NULL if unable to retreive.
  */
-uint8_t* topology_sampler_alloc_last_network_config(uint32_t &network_crc32, uint32_t &cbor_config_size) {
+uint8_t *topology_sampler_alloc_last_network_config(uint32_t &network_crc32,
+                                                    uint32_t &cbor_config_size) {
   uint8_t *rval = NULL;
   if (xSemaphoreTake(_node_list.node_list_mutex, pdMS_TO_TICKS(NETWORK_CONFIG_TIMEOUT_MS))) {
     do {
@@ -741,7 +754,8 @@ uint8_t* topology_sampler_alloc_last_network_config(uint32_t &network_crc32, uin
       cbor_config_size = _node_list.last_network_configuration_info.cbor_config_map_size;
       rval = static_cast<uint8_t *>(pvPortMalloc(cbor_config_size));
       configASSERT(rval);
-      memcpy(rval, _node_list.last_network_configuration_info.cbor_config_map, cbor_config_size);
+      memcpy(rval, _node_list.last_network_configuration_info.cbor_config_map,
+             cbor_config_size);
     } while (0);
     xSemaphoreGive(_node_list.node_list_mutex);
   }
@@ -752,7 +766,7 @@ uint8_t* topology_sampler_alloc_last_network_config(uint32_t &network_crc32, uin
  * @brief Callback function for "spotter/request-last-network-config" topic.
  * Triggers a sending of most recent network info.
  */
-void bm_topology_last_network_info_cb(void){
+void bm_topology_last_network_info_cb(void) {
   if (xSemaphoreTake(_node_list.node_list_mutex, pdMS_TO_TICKS(NETWORK_CONFIG_TIMEOUT_MS))) {
     do {
 
@@ -770,10 +784,11 @@ void bm_topology_last_network_info_cb(void){
 
       getFWVersion(&fw_info.major, &fw_info.minor, &fw_info.revision);
       fw_info.gitSHA = getGitSHA();
-      bm_serial_send_network_info(_node_list.last_network_configuration_info.network_crc32, &config_crc, &fw_info,
-                                  _node_list.num_nodes, _node_list.nodes,
-                                  _node_list.last_network_configuration_info.cbor_config_map_size,
-                                  _node_list.last_network_configuration_info.cbor_config_map);
+      bm_serial_send_network_info(
+          _node_list.last_network_configuration_info.network_crc32, &config_crc, &fw_info,
+          _node_list.num_nodes, _node_list.nodes,
+          _node_list.last_network_configuration_info.cbor_config_map_size,
+          _node_list.last_network_configuration_info.cbor_config_map);
     } while (0);
     xSemaphoreGive(_node_list.node_list_mutex);
   }
@@ -798,7 +813,7 @@ void bm_topology_last_network_info_cb(void){
  * @param app_name_len The length of the application name.
  */
 static void _update_sensor_type_list(uint64_t node_id, char *app_name, uint32_t app_name_len) {
-  (void) app_name_len;
+  (void)app_name_len;
   for (uint8_t i = 0; i < TOPOLOGY_SAMPLER_MAX_NODE_LIST_SIZE; i++) {
     if (_node_list.nodes[i] == node_id) {
       if (strncmp(app_name, "aanderaa", strlen("aanderaa")) == 0) {
@@ -807,7 +822,58 @@ static void _update_sensor_type_list(uint64_t node_id, char *app_name, uint32_t 
       } else if (strncmp(app_name, "bm_soft_module", strlen("bm_soft_module")) == 0) {
         _node_list.sensor_type[i] = SENSOR_TYPE_SOFT;
         break;
+      } else if (strncmp(app_name, "bm_rbr", strlen("bm_rbr")) == 0) {
+        _node_list.sensor_type[i] = SENSOR_TYPE_RBR_CODA;
       }
     }
+  }
+}
+
+static CborError cborStreamFunct(void *token, const char *fmt, ...) {
+  (void)token;
+  va_list args;
+  va_start(args, fmt);
+  vBridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, NO_HEADER, fmt, args);
+  va_end(args);
+  return CborNoError;
+}
+
+static void log_cbor_network_configurations(uint8_t *cbor_buf, size_t cbor_buf_size) {
+  configASSERT(cbor_buf);
+  CborError err = CborNoError;
+  bridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, USE_HEADER, "Bridge network config: \n");
+  do {
+    CborParser parser;
+    CborValue it;
+    err = cbor_parser_init(cbor_buf, cbor_buf_size, 0, &parser, &it);
+    if (err != CborNoError) {
+      break;
+    }
+    cbor_value_to_pretty_stream(cborStreamFunct, NULL, &it, CborPrettyDefaultFlags);
+  } while (0);
+  bridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, NO_HEADER, "\n");
+}
+
+static void log_network_crc_info(uint32_t network_crc32, SMConfigCRCList &sm_config_crc_list) {
+  uint32_t epoch = 0;
+  RTCTimeAndDate_t rtc;
+  rtcGet(&rtc);
+  epoch = rtcGetMicroSeconds(&rtc) / 1000000;
+
+  bridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, USE_HEADER,
+                 "Network configuration change detected! crc: 0x%" PRIx32 " at UTC:%" PRIu32
+                 "\n",
+                 network_crc32, epoch);
+  uint32_t num_stored_crcs = 0;
+  uint32_t *stored_crcs = sm_config_crc_list.alloc_list(num_stored_crcs);
+  bridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, USE_HEADER, "Stored CRCs: \n");
+  if (stored_crcs) {
+    for (uint32_t i = 0; i < num_stored_crcs; i++) {
+      bridgeLogPrint(BRIDGE_CFG, BM_COMMON_LOG_LEVEL_INFO, NO_HEADER, "0x%" PRIx32 "\n",
+                     stored_crcs[i]);
+    }
+  }
+  if (stored_crcs) {
+    vPortFree(stored_crcs);
   }
 }

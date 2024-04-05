@@ -49,9 +49,9 @@ bool validSensorDataString(const char *s, size_t strlen) {
 bool validSensorData(DataType_e type, double val) {
   switch (type) {
   case TEMPERATURE: // in degrees C
-    return val >= -5.0 && val <= 35.0;
+    return val >= -40.0 && val <= 125.0;
   case PRESSURE: // in decibar
-    return val >= 5.0 && val <= 85.0;
+    return val >= 5.0 && val <= 200.0;
   default:
     return false;
   }
@@ -80,6 +80,23 @@ bool validSensorOutputformat(const char *s, size_t strlen) {
     rval = true;
   } while (0);
   return rval;
+}
+
+void preprocessLine(char *str, uint16_t &len) {
+  static constexpr char readystr[] = "Ready: ";
+  configASSERT(str);
+  if (!len) {
+    return;
+  }
+  char *readyString = strstr(str, readystr);
+  if (readyString) {
+    char *endReady = readyString + strlen(readystr);
+    if (endReady < str + len) {
+      memmove(readyString, endReady, len - (endReady - str));
+      len -= strlen(readystr);
+      memset(str + len, 0, strlen(readystr));
+    }
+  }
 }
 
 static bool validSpecialChar(char c) {

@@ -1,17 +1,26 @@
 #pragma once
+#include "bm_common_structs.h"
+#include <stdarg.h>
 #include <stdlib.h>
 
 constexpr size_t SENSOR_LOG_BUF_SIZE = 512;
+constexpr bool USE_HEADER = true;
+constexpr bool NO_HEADER = false;
 
 typedef enum {
-    BM_COMMON_IND,
-    BM_COMMON_AGG,
+  BM_COMMON_IND,
+  BM_COMMON_AGG,
 } bridgeSensorLogType_e;
 
-void bridgeLogPrintf(const char *str, size_t len);
-void bridgeSensorLogPrintf(bridgeSensorLogType_e type, const char *str, size_t len);
+typedef enum {
+  BRIDGE_SYS,
+  BRIDGE_CFG,
+} bridgeLogType_e;
 
-#define BRIDGE_LOG_PRINT(x)  bridgeLogPrintf(x, sizeof(x))
-#define BRIDGE_LOG_PRINTN(x,n)  bridgeLogPrintf(x, n)
-#define BRIDGE_SENSOR_LOG_PRINT(type, x)  bridgeSensorLogPrintf(type, x, sizeof(x))
-#define BRIDGE_SENSOR_LOG_PRINTN(type, x,n)  bridgeSensorLogPrintf(type, x, n)
+void bridgeLogPrint(bridgeLogType_e type, bm_common_log_level_e level, bool print_header,
+                    const char *format, ...);
+void vBridgeLogPrint(bridgeLogType_e type, bm_common_log_level_e level, bool print_header,
+                     const char *format, va_list va_args);
+void bridgeSensorLogPrintf(bridgeSensorLogType_e type, const char *str, size_t len);
+#define BRIDGE_SENSOR_LOG_PRINT(type, x) bridgeSensorLogPrintf(type, x, sizeof(x))
+#define BRIDGE_SENSOR_LOG_PRINTN(type, x, n) bridgeSensorLogPrintf(type, x, n)

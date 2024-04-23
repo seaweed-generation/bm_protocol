@@ -42,6 +42,7 @@ set(BRISTLEMOUTH_INCLUDES
 set(LIB_FILES
     ${SRC_DIR}/lib/common/avgSampler.cpp
     ${SRC_DIR}/lib/cli/cli.c
+    ${SRC_DIR}/lib/common/avgSampler.cpp
     ${SRC_DIR}/lib/common/bootloader_helper.c
     ${SRC_DIR}/lib/common/device_info.c
     ${SRC_DIR}/lib/common/enumToStr.c
@@ -109,6 +110,7 @@ set(LIB_FILES
     ${SRC_DIR}/lib/sensor_sampler/powerSampler.cpp
     ${SRC_DIR}/lib/bristlefin/bristlefin.cpp
     ${SRC_DIR}/lib/common/LineParser.cpp
+    ${SRC_DIR}/lib/common/OrderedSeparatorLineParser.cpp
     ${SRC_DIR}/third_party/aligned_malloc/aligned_malloc.c
     ${SRC_DIR}/third_party/crc/crc16.c
     ${SRC_DIR}/third_party/crc/crc32.c

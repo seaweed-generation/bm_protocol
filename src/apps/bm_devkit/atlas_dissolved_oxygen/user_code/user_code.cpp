@@ -18,22 +18,18 @@
 #include "usart.h"
 #include "util.h"
 
-#define LED_ON_TIME_MS 20
-#define LED_PERIOD_MS 1000
-#define BYTES_CLUSTER_MS 50
-
 #define DEFAULT_BAUD_RATE 9600
 #define DEFAULT_LINE_TERM 13 // CR / '\r', 0x0D
 
 /// For Turning Numbers Into Data
+#define SAMPLE_PERIOD_MS 10000
 // How often to compute and return statistics
-#define AGG_PERIOD_MIN 1
+#define AGG_PERIOD_MIN 5
 // 10 min => 600,000 ms
 #define AGG_PERIOD_MS (AGG_PERIOD_MIN * 60 * 1000)
 /* We have enough RAM that we can keep it simple for shorter durations - use 64 bit doubles, buffer all readings.
    We could be much more RAM and precision efficient by using numerical methods like Kahan summation and Welford's algorithm.*/
-// 10 minutes @ 2Hz + 10 extra samples for padding => 1210, ~10k RAM
-#define MAX_SAMPLES ((AGG_PERIOD_MS / 500) + 10)
+#define MAX_SAMPLES ((AGG_PERIOD_MS / SAMPLE_PERIOD_MS) + 10)
 typedef struct {
   uint16_t sample_count;
   double min;
@@ -169,7 +165,7 @@ void loop(void) {
       return; // FIXME: this is a little confusing
     }
 
-    double reading = parser.getValue(1).data.double_val;
+    double reading = parser.getValue(0).data.double_val;
     avg_data.addSample(reading);
 
     printf("count: %u/%d, min: %f, max: %f\n", avg_data.getNumSamples(),
